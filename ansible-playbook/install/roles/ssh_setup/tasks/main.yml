@@ -18,4 +18,4 @@
   ansible.posix.authorized_key:
     user: "{{ ansible_user }}"
     state: present
-    key: "{{ ssh_setup_key_pair_info.key_pairs[0].public_key }}"
+    key: "{{ ssh_setup_key_pair_info.keypairs[0].public_key }}"
