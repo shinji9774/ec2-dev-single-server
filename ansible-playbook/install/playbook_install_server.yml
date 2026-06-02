@@ -1,0 +1,7 @@
+---
+- name: Setup Ansible container
+  ansible.builtin.import_playbook: _playbook_prepare_container.yml
+  when: lookup('env', 'EXECUTE_FROM_ECS') == 'true'
+
+- name: Install server
+  ansible.builtin.import_playbook: _playbook_install_server.yml
