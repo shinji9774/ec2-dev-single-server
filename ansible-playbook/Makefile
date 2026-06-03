@@ -36,3 +36,11 @@ run-local: build ## [development] run ansible playbook in docker container
 .PHONY : syntax-check
 syntax-check: ## [development] syntax check all playbooks
 	ansible-playbook -i hosts.yml --syntax-check $(shell find . -name 'playbook_*.yml')
+
+.PHONY : generate-ansible-requirements
+generate-ansible-requirements: ## [development] generate ansible collection requirements
+	@echo "# Generated Ansible Collection Requirements" > requirements.yml; \
+	echo "---" >> requirements.yml; \
+	find install/roles -path '*/tasks/*.yml' | xargs cat | \
+	yq -sy '{"collections":[.[].[] | keys[] | split(".")[0:2] | select(length > 1) | join(".") | select(. != "ansible.builtin")] | unique}' | \
+	tee -a requirements.yml
