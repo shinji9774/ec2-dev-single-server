@@ -4,20 +4,4 @@
     target_server: "{{ lookup('env', 'TARGET_INSTANCE_ID', default=undef()) }}"
     keypair_id: "{{ lookup('env', 'KEYPAIR_ID', default=undef()) }}"
     home_key_pair_name: "{{ lookup('env', 'KEY_NAME', default=undef()) }}"
-  when: inventory_hostname == 'localhost'
-
-- name: Validate required common variables
-  ansible.builtin.assert:
-    that:
-      - home_key_pair_name != ''
-    fail_msg: "One or more required variables are not set. Please ensure all required environment variables are provided."
-    quiet: true
-
-- name: Validate required variables for localhost
-  ansible.builtin.assert:
-    that:
-      - target_server != ''
-      - keypair_id != ''
-    fail_msg: "One or more required variables are not set. Please ensure all required environment variables are provided."
-    quiet: true
-  when: inventory_hostname == 'localhost'
+    aws_region: "{{ lookup('env', 'AWS_REGION', default=undef()) }}"
