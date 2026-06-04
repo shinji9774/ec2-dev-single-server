@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  CloudFormation template to create a VPC with a Lambda function
+  that looks up the Internet Gateway ID and available subnet CIDR block.
+  This can be used as a base for your development VPC.
+
+Parameters:
+  VpcCIDR:
+    Description: CIDR block for the VPC
+    Type: String
+    MinLength: "9"
+    MaxLength: "18"
+    AllowedPattern: (\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/(\d{1,2})
+    ConstraintDescription: must be a valid IP CIDR range of the form x.x.x.x/x.
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+
+  # Create InternetGateway
+  myInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref myInternetGateway
+
+  # -------------------------------------------------------
+  # Lambda: VPC から IGW ID と空きサブネット CIDR を取得
+  # -------------------------------------------------------
+  VpcLookupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VpcDescribe
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:DescribeInternetGateways
+                  - ec2:DescribeVpcs
+                  - ec2:DescribeSubnets
+                Resource: "*"
+              - Effect: Deny
+                Action:
+                  - logs:CreateLogGroup
+                Resource: "*"
+
+  VpcLookupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Timeout: 60
+      LoggingConfig:
+        LogGroup: !Ref VpcLookupFunctionLogGroup
+      Role: !GetAtt VpcLookupRole.Arn
+      Environment:
+        Variables:
+          VPC_ID: !Ref VPC
+      Code:
+        ZipFile: |
+          import ipaddress
+          import os
+
+          import boto3
+          import cfnresponse
+
+
+          def send(event, context, status, data={}, reason=None):
+              request_prefix = event["ResourceProperties"].get("RequestPrefix", "CustomResource")
+              cfnresponse.send(event, context, status, data, f"{request_prefix}-VpcLookup", False, reason)
+
+
+          def handler(event, context):
+              try:
+                  if event["RequestType"] == "Delete":
+                      return send(event, context, "SUCCESS")
+
+                  ec2 = boto3.client("ec2")
+                  vpc_id = os.environ["VPC_ID"]
+                  prefix = int(event["ResourceProperties"]["SubnetPrefix"])
+
+                  # 1) IGW を取得
+                  igws = ec2.describe_internet_gateways(
+                      Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]
+                  )["InternetGateways"]
+                  if not igws:
+                      raise Exception(f"No Internet Gateway attached to {vpc_id}")
+                  igw_id = igws[0]["InternetGatewayId"]
+
+                  # 2) VPC CIDR を取得
+                  vpcs = ec2.describe_vpcs(VpcIds=[vpc_id])["Vpcs"]
+                  if not vpcs:
+                      raise Exception(f"VPC {vpc_id} not found")
+                  vpc_cidr = vpcs[0]["CidrBlock"]
+
+                  # 3) 既存サブネットの CIDR を収集
+                  existing = ec2.describe_subnets(Filters=[{"Name": "vpc-id", "Values": [vpc_id]}])["Subnets"]
+                  used = {ipaddress.ip_network(s["CidrBlock"]) for s in existing}
+
+                  # 4) 空きサブネットを探す
+                  for candidate in ipaddress.ip_network(vpc_cidr).subnets(new_prefix=prefix):
+                      if not any(candidate.overlaps(u) for u in used):
+                          subnet_cidr = str(candidate)
+                          break
+                  else:
+                      raise Exception(f"No available /{prefix} subnet in {vpc_cidr}")
+
+                  send(
+                      event,
+                      context,
+                      "SUCCESS",
+                      {
+                          "InternetGatewayId": igw_id,
+                          "SubnetCidrBlock": subnet_cidr,
+                          "VpcId": vpc_id,
+                      },
+                  )
+              except Exception as e:
+                  print(e)
+                  send(event, context, "FAILED", reason=str(e))
+
+  VpcLookupFunctionLogGroup:
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${AWS::StackName}-vpc-lookup-function
+      RetentionInDays: 7
+
+  # Sample Custom Resource for VPC Lookup (use the output of this resource in your stack to get IGW ID and available subnet CIDR)
+  TestVpcLookup:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn:
+      - AttachGateway
+    Properties:
+      ServiceToken: !GetAtt VpcLookupFunction.Arn
+      RequestPrefix: !Sub ${AWS::StackName}-test
+      SubnetPrefix: "24"
+
+Outputs:
+  VpcLookupFunction:
+    Value: !GetAtt VpcLookupFunction.Arn
+    Description: ARN of the Lambda function that looks up VPC info (IGW ID and available subnet CIDR)
+  VpcId:
+    Value: !GetAtt TestVpcLookup.VpcId
+    Description: VPC ID of the created VPC
+  TestOutputInternetGatewayId:
+    Value: !GetAtt TestVpcLookup.InternetGatewayId
+    Description: Internet Gateway ID obtained from the custom resource
+  TestOutputSubnetCidrBlock:
+    Value: !GetAtt TestVpcLookup.SubnetCidrBlock
+    Description: Available subnet CIDR block obtained from the custom resource
